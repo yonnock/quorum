@@ -144,6 +144,9 @@ reporting without breaking the build.
   `confirmCI` asks GitHub for a conflict before it blames a missing check. Only
   `ensureFinalCIGreen`, the wait after the suggestion round, skips the update:
   no review follows it, and a base merge is never reported ready unreviewed.
+  The local conflict probe (`git.MergeConflicts`) reads a full
+  `git merge-tree`; do not switch it back to `--quiet`, which git 2.54 answers
+  with exit 0 for merges that conflict.
 - **A review run directory belongs to its review only while the review runs.**
   Its claim ends when `review.Runner.Run` returns, and cache collection may
   remove the directory from then on. Anything the pipeline needs later, such as

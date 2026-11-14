@@ -83,6 +83,71 @@ func TestUnmergedFilesReportsMergeConflicts(t *testing.T) {
 	}
 }
 
+// The probe must see a conflict in a repository where the two sides also
+// changed different files of one directory, which is every real repository.
+// `git merge-tree --quiet` exits 0 for that shape (seen with git 2.54) even
+// though the merge conflicts, and a conflict-only base update then leaves a
+// conflicting branch alone.
+func TestMergeConflictsSeesAConflictBesideACleanDirectoryMerge(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	write := func(name, content string) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run("init", "-q", "-b", "main")
+	write("app/shared.txt", "base\n")
+	write("docs/one.txt", "base\n")
+	write("docs/two.txt", "base\n")
+	run("add", "-A")
+	run("commit", "-q", "-m", "base")
+	run("checkout", "-q", "-b", "feature")
+	write("app/shared.txt", "feature\n")
+	write("docs/one.txt", "feature\n")
+	run("commit", "-q", "-am", "feature change")
+	run("checkout", "-q", "-b", "clean", "main")
+	write("docs/one.txt", "clean\n")
+	run("commit", "-q", "-am", "clean change")
+	run("checkout", "-q", "main")
+	write("app/shared.txt", "main\n")
+	write("docs/two.txt", "main\n")
+	run("commit", "-q", "-am", "main change")
+
+	g := New("git")
+	conflicts, err := g.MergeConflicts(context.Background(), dir, "feature", "main")
+	if err != nil || !conflicts {
+		t.Fatalf("MergeConflicts(feature, main) = %v, %v; want a conflict", conflicts, err)
+	}
+	conflicts, err = g.MergeConflicts(context.Background(), dir, "clean", "main")
+	if err != nil || conflicts {
+		t.Fatalf("MergeConflicts(clean, main) = %v, %v; want a clean merge", conflicts, err)
+	}
+	if _, err := g.MergeConflicts(context.Background(), dir, "feature", "no-such-branch"); err == nil {
+		t.Fatal("MergeConflicts with an unknown revision reported an answer")
+	}
+}
+
 func TestCleanUntrackedPreservesTrackedAndIgnoredFiles(t *testing.T) {
 	dir := t.TempDir()
 	run := func(args ...string) {

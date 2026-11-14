@@ -25,7 +25,7 @@ func conflictAwareGH(t *testing.T, origin string) string {
 	return writeTool(t, "gh", `
 origin='`+origin+`'
 state='`+state+`'
-conflicts() { ! git -C "$origin" merge-tree --write-tree --quiet refs/heads/main "$1" >/dev/null 2>&1; }
+conflicts() { ! git -C "$origin" merge-tree --write-tree refs/heads/main "$1" >/dev/null 2>&1; }
 head=$(git -C "$origin" rev-parse refs/heads/feature)
 case "$1 $2" in
   "pr checks")

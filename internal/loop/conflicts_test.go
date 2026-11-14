@@ -259,7 +259,7 @@ case "$*" in
   "fetch -q origin +refs/heads/main:refs/remotes/origin/main") ;;
   "rev-parse origin/main") echo "base-sha" ;;
 	"merge-base --is-ancestor base-sha HEAD") exit 1 ;;
-	"merge-tree --write-tree --quiet HEAD base-sha") exit 1 ;;
+	"merge-tree --write-tree --name-only HEAD base-sha") echo "tree-sha"; echo "shared.txt"; exit 1 ;;
 	"rev-parse HEAD") echo "head-sha" ;;
 	"merge --no-ff -m Merge main into feature base-sha") echo "merge refused" >&2; exit 2 ;;
 	"diff --name-only --diff-filter=U") ;;
