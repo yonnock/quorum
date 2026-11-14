@@ -166,7 +166,9 @@ Draft PRs need a `--draft` flag (or `BABYSIT_DRAFTS=1` in the config) before
 babysit will push fixes and comments to them. Before the first review and before
 reporting ready, babysit fetches the base and merges it when the branch is
 behind. Conflicts go through the fix session, and the merged head is reviewed
-again. `--no-resolve-conflicts` turns all automatic base updates off.
+again. A pushed CI fix gets the same update before its checks are awaited,
+because GitHub runs no pull request workflow for a head that conflicts with its
+base. `--no-resolve-conflicts` turns all automatic base updates off.
 
 Only Blockers and Critical keep the loop alive. Suggestions and Questions are
 handed to each fix round once, so the loop cannot chase moving targets forever.

@@ -98,6 +98,14 @@ the fix session, and the merged head is reviewed again. `BASE_UPDATE=conflicts`
 merges only when the base would conflict. `RESOLVE_CONFLICTS=0`
 or `--no-resolve-conflicts` turns all automatic base updates off.
 
+A pushed CI fix gets the same base update before its checks are awaited. GitHub
+starts no `pull_request` workflow for a head that conflicts with its base, so a
+fix that collides with the base, usually because the base repaired the same
+failure, would otherwise wait for required checks that never report. The one
+wait that skips the update is the one after the suggestion round, because no
+review follows it. A head that conflicts there, or with base updates turned
+off, stops the run with exit 3 and a message that names the conflict.
+
 When the final review comes back with zero Blockers and Critical findings but
 still lists Suggestions, one last fix round triages them in the same session:
 it implements the ones worth keeping, skips the ones that describe intended

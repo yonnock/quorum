@@ -220,7 +220,19 @@ func (r *run) killReview() {
 	<-br.done
 }
 
-func (r *run) ensureCIGreen() error {
+// ensureCIGreen waits for the head's CI and hands a red result to a fix
+// session, at most MaxCIFixes times. After each pushed fix it brings the head
+// back in line with the base, so every caller must have a review follow it:
+// that review is what covers the merge.
+func (r *run) ensureCIGreen() error { return r.waitCIGreen(true) }
+
+// ensureFinalCIGreen is ensureCIGreen for the one wait no review follows, the
+// terminal suggestion round's. It never merges the base: reporting ready on a
+// base merge no review has seen is what the run refuses everywhere else. A
+// head left in conflict stops the wait with ErrCIUnconfirmed instead.
+func (r *run) ensureFinalCIGreen() error { return r.waitCIGreen(false) }
+
+func (r *run) waitCIGreen(refreshBase bool) error {
 	for attempt := 0; ; {
 		r.prog.CI = CIWaiting
 		r.enter(PhaseCI)
@@ -284,7 +296,34 @@ func (r *run) ensureCIGreen() error {
 		if err := r.postFixComment(step, label, "", "", preSHA); err != nil {
 			return err
 		}
+		if refreshBase {
+			if err := r.refreshBaseAfterCIFix(); err != nil {
+				return err
+			}
+		}
 	}
+}
+
+// refreshBaseAfterCIFix runs the base update on a freshly pushed CI fix,
+// before the wait for its checks starts.
+//
+// A fix can collide with what the base changed while the branch was red,
+// typically because the base repaired the same failure in its own way. GitHub
+// starts no pull_request workflow for a head that conflicts with its base, so
+// waiting on such a head ends with required checks that never report. No
+// review runs at this point: the fix discarded it.
+func (r *run) refreshBaseAfterCIFix() error {
+	updated, err := r.ensureBaseCurrent()
+	if err != nil || !updated || !r.o.Offline {
+		return err
+	}
+	// An offline base update stays local until the run converges. This wait
+	// is for the pushed head, though, so the merge has to reach the remote
+	// now, and with it whatever the update queued for the pull request.
+	if err := r.pushBranchWithFixes(); err != nil {
+		return err
+	}
+	return r.flushFixComments()
 }
 
 // awaitChecks runs watchCI in the background so the reporter can tick the CI
@@ -473,12 +512,22 @@ func (r *run) confirmCI(cw *ciWait) (gh.CheckState, error) {
 			r.announceCIRegistration(cw, "waiting for required check(s) "+strings.Join(missing, ", ")+" to report")
 			return gh.ChecksPending, nil
 		}
+		if r.conflictBlocksCI(sha) {
+			return gh.ChecksPending, r.errConflictBlocksCI(sha)
+		}
 		return gh.ChecksPending, fmt.Errorf("%w: required check(s) %s of %s did not report for %s after %s",
 			ErrCIUnconfirmed, strings.Join(missing, ", "), r.pr.BaseRefName, sha, r.timing.noChecksWindow())
 	}
-	if len(runs) == 0 && inWindow && r.workflowsExpected(cw) {
-		r.announceCIRegistration(cw, "waiting for GitHub Actions to register the runs of "+sha)
-		return gh.ChecksPending, nil
+	if len(runs) == 0 && r.workflowsExpected(cw) {
+		if inWindow {
+			r.announceCIRegistration(cw, "waiting for GitHub Actions to register the runs of "+sha)
+			return gh.ChecksPending, nil
+		}
+		// Without a required check the missing runs would otherwise read as
+		// a head that has no Actions CI, and pass on its external checks.
+		if r.conflictBlocksCI(sha) {
+			return gh.ChecksPending, r.errConflictBlocksCI(sha)
+		}
 	}
 	if len(checks) == 0 && len(runs) == 0 {
 		if inWindow {
@@ -487,6 +536,22 @@ func (r *run) confirmCI(cw *ciWait) (gh.CheckState, error) {
 		return gh.ChecksNone, nil
 	}
 	return gh.ChecksPass, nil
+}
+
+// conflictBlocksCI reports whether GitHub marks the pull request, at sha, as
+// conflicting with its base. It is asked only once the registration window
+// passed without the head's checks or runs: GitHub starts no pull_request
+// workflow for a conflicting pull request, so nothing would ever arrive. A
+// failed lookup or a mergeability GitHub has not computed counts as no; the
+// wait then ends the way it did without this answer.
+func (r *run) conflictBlocksCI(sha string) bool {
+	d, err := r.p.GH.PRDetails(r.ctx, r.o.Repo, r.pr.Number)
+	return err == nil && d.HeadRefOid == sha && d.Mergeable == "CONFLICTING"
+}
+
+func (r *run) errConflictBlocksCI(sha string) error {
+	return fmt.Errorf("%w: pull request #%d conflicts with %s, and GitHub starts no pull_request workflow for a conflicting head (%s); resolve the conflicts and run again",
+		ErrCIUnconfirmed, r.pr.Number, r.pr.BaseRefName, sha)
 }
 
 // workflowsExpected reports whether the repository has workflow files that
