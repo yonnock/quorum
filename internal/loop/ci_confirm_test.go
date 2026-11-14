@@ -26,6 +26,9 @@ type ciFixture struct {
 	statuses []string
 	runs     []string
 	flows    []string
+	// prView answers `gh pr view`; empty means a mergeable pull request at
+	// the head the test runs use.
+	prView string
 }
 
 const (
@@ -37,6 +40,10 @@ const (
 	noRuns       = `{"workflow_runs":[]}`
 	someWorkflow = `{"workflows":[{"path":".github/workflows/ci.yml","state":"active"}]}`
 )
+
+func prViewJSON(head, mergeable string) string {
+	return fmt.Sprintf(`{"baseRefName":"main","headRefOid":%q,"state":"OPEN","mergeable":%q}`, head, mergeable)
+}
 
 func checkRunsJSON(gate string) string {
 	switch gate {
@@ -76,6 +83,10 @@ func (f ciFixture) install(t *testing.T) (string, func(endpoint string) int) {
 		}
 	}
 	write("pr-checks", f.prChecks)
+	if f.prView == "" {
+		f.prView = prViewJSON("abc123", "MERGEABLE")
+	}
+	write("pr-view", f.prView)
 	bin := filepath.Join(dir, "gh")
 	script := `#!/bin/sh
 dir='` + dir + `'
@@ -83,6 +94,7 @@ if test "$1" = pr && test "$2" = checks; then
   n=$(cat "$dir/pr-checks.count" 2>/dev/null || echo 0); echo $((n + 1)) > "$dir/pr-checks.count"
   cat "$dir/pr-checks"; exit 0
 fi
+if test "$1" = pr && test "$2" = view; then cat "$dir/pr-view"; exit 0; fi
 if test "$1" != api; then echo "unexpected: $*" >&2; exit 1; fi
 ep=
 for a in "$@"; do
@@ -337,5 +349,64 @@ func TestCIWaitReportsNoChecksAfterTheWindow(t *testing.T) {
 	}
 	if state != gh.ChecksNone {
 		t.Fatalf("state = %v, want ChecksNone", state)
+	}
+}
+
+// GitHub starts no pull_request workflow for a head that conflicts with its
+// base. Where no check is required, the missing runs must not read as a head
+// without Actions CI that passes on its external check.
+func TestCIWaitStopsOnAConflictingHeadThatGotNoRuns(t *testing.T) {
+	fixture := func(prView string) ciFixture {
+		return ciFixture{
+			prChecks: "secret-scan\tpass",
+			branch:   []string{noProtection},
+			rules:    []string{noRules},
+			checks:   []string{noCheckRuns},
+			statuses: []string{externalOnly},
+			runs:     []string{noRuns},
+			flows:    []string{someWorkflow},
+			prView:   prView,
+		}
+	}
+
+	bin, _ := fixture(prViewJSON("abc123", "CONFLICTING")).install(t)
+	r := ciTestRun(t, bin)
+	r.timing = fastCIWait(50 * time.Millisecond)
+	if _, err := r.watchCI(); !errors.Is(err, ErrCIUnconfirmed) ||
+		!strings.Contains(err.Error(), "#42 conflicts with main") {
+		t.Fatalf("watchCI = %v, want ErrCIUnconfirmed naming the conflict", err)
+	}
+
+	// A conflict GitHub reports for another head says nothing about this one.
+	bin, _ = fixture(prViewJSON("def456", "CONFLICTING")).install(t)
+	r = ciTestRun(t, bin)
+	r.timing = fastCIWait(50 * time.Millisecond)
+	if state, err := r.watchCI(); err != nil || state != gh.ChecksPass {
+		t.Fatalf("watchCI = %v, %v; want ChecksPass", state, err)
+	}
+}
+
+// A required check that never reported is explained by the conflict when
+// GitHub reports one for the head.
+func TestCIWaitNamesTheConflictBehindAMissingRequiredCheck(t *testing.T) {
+	bin, _ := ciFixture{
+		prChecks: "secret-scan\tpass",
+		branch:   []string{ciGateRule},
+		rules:    []string{noRules},
+		checks:   []string{noCheckRuns},
+		statuses: []string{externalOnly},
+		runs:     []string{noRuns},
+		flows:    []string{someWorkflow},
+		prView:   prViewJSON("abc123", "CONFLICTING"),
+	}.install(t)
+	r := ciTestRun(t, bin)
+	r.timing = fastCIWait(50 * time.Millisecond)
+
+	_, err := r.watchCI()
+	if !errors.Is(err, ErrCIUnconfirmed) || !strings.Contains(err.Error(), "#42 conflicts with main") {
+		t.Fatalf("watchCI = %v, want ErrCIUnconfirmed naming the conflict", err)
+	}
+	if strings.Contains(err.Error(), "did not report") {
+		t.Fatalf("error = %q, want the conflict instead of the missing check", err)
 	}
 }

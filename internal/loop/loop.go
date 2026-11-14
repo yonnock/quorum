@@ -57,9 +57,10 @@ var (
 	// allowed fix attempts.
 	ErrTestsRed = errors.New("the test command still fails after the allowed fix attempts")
 	// ErrCIUnconfirmed maps onto exit 3 as well: GitHub never confirmed CI for
-	// the head - a required check did not report, or a workflow run failed
-	// without a check a fix session could be pointed at. The run stops rather
-	// than reading as green or spending a fix session on it.
+	// the head - a required check did not report, a workflow run failed
+	// without a check a fix session could be pointed at, or the head conflicts
+	// with its base and GitHub started no workflow for it. The run stops
+	// rather than reading as green or spending a fix session on it.
 	ErrCIUnconfirmed = errors.New("CI not confirmed green for the head")
 )
 
@@ -888,7 +889,7 @@ func (r *run) suggestionRound(round int, findings review.Findings, comment, preS
 	// The run still ends on this push, so the same barrier as any other round
 	// applies: babysit must not report success on a head whose checks are red.
 	if !r.target.BranchOnly {
-		if err := r.ensureCIGreen(); err != nil {
+		if err := r.ensureFinalCIGreen(); err != nil {
 			return true, err
 		}
 	}

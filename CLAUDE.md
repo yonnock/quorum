@@ -138,6 +138,12 @@ reporting without breaking the build.
   its list may still lack Actions runs GitHub has not registered yet, so a
   green answer is only accepted after `confirmCI` checks the exact head sha:
   required checks reported and passed, Actions runs finished.
+- **A head that conflicts with its base gets no CI.** GitHub starts no
+  `pull_request` workflow for it, so its required checks never report. That is
+  why `ensureCIGreen` runs the base update after every pushed CI fix, and why
+  `confirmCI` asks GitHub for a conflict before it blames a missing check. Only
+  `ensureFinalCIGreen`, the wait after the suggestion round, skips the update:
+  no review follows it, and a base merge is never reported ready unreviewed.
 - **A review run directory belongs to its review only while the review runs.**
   Its claim ends when `review.Runner.Run` returns, and cache collection may
   remove the directory from then on. Anything the pipeline needs later, such as
