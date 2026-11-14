@@ -538,15 +538,32 @@ func (r *run) confirmCI(cw *ciWait) (gh.CheckState, error) {
 	return gh.ChecksPass, nil
 }
 
+// mergeabilityAsks bounds how often conflictBlocksCI asks GitHub for a
+// mergeability it has not computed yet.
+const mergeabilityAsks = 6
+
 // conflictBlocksCI reports whether GitHub marks the pull request, at sha, as
 // conflicting with its base. It is asked only once the registration window
 // passed without the head's checks or runs: GitHub starts no pull_request
-// workflow for a conflicting pull request, so nothing would ever arrive. A
-// failed lookup or a mergeability GitHub has not computed counts as no; the
-// wait then ends the way it did without this answer.
+// workflow for a conflicting pull request, so nothing would ever arrive.
+//
+// GitHub computes mergeability in the background and forgets it whenever the
+// base moves, answering UNKNOWN until it has caught up, so that answer is
+// asked again a few times. A failed lookup or a mergeability that stays
+// unknown counts as no; the wait then ends the way it did without this answer.
 func (r *run) conflictBlocksCI(sha string) bool {
-	d, err := r.p.GH.PRDetails(r.ctx, r.o.Repo, r.pr.Number)
-	return err == nil && d.HeadRefOid == sha && d.Mergeable == "CONFLICTING"
+	for ask := 1; ; ask++ {
+		d, err := r.p.GH.PRDetails(r.ctx, r.o.Repo, r.pr.Number)
+		if err != nil || d.HeadRefOid != sha {
+			return false
+		}
+		if d.Mergeable != "UNKNOWN" || ask == mergeabilityAsks {
+			return d.Mergeable == "CONFLICTING"
+		}
+		if r.sleep(r.timing.ciPending()) != nil {
+			return false
+		}
+	}
 }
 
 func (r *run) errConflictBlocksCI(sha string) error {

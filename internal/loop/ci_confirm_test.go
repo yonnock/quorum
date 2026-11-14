@@ -26,9 +26,9 @@ type ciFixture struct {
 	statuses []string
 	runs     []string
 	flows    []string
-	// prView answers `gh pr view`; empty means a mergeable pull request at
-	// the head the test runs use.
-	prView string
+	// prView answers `gh pr view`, as a sequence like the API endpoints;
+	// empty means a mergeable pull request at the head the test runs use.
+	prView []string
 }
 
 const (
@@ -71,9 +71,12 @@ func (f ciFixture) install(t *testing.T) (string, func(endpoint string) int) {
 			t.Fatal(err)
 		}
 	}
+	if len(f.prView) == 0 {
+		f.prView = []string{prViewJSON("abc123", "MERGEABLE")}
+	}
 	for endpoint, seq := range map[string][]string{
 		"branch": f.branch, "rules": f.rules, "check-runs": f.checks,
-		"status": f.statuses, "runs": f.runs, "workflows": f.flows,
+		"status": f.statuses, "runs": f.runs, "workflows": f.flows, "pr-view": f.prView,
 	} {
 		for i, body := range seq {
 			write(fmt.Sprintf("%s.%d", endpoint, i+1), body)
@@ -83,10 +86,6 @@ func (f ciFixture) install(t *testing.T) (string, func(endpoint string) int) {
 		}
 	}
 	write("pr-checks", f.prChecks)
-	if f.prView == "" {
-		f.prView = prViewJSON("abc123", "MERGEABLE")
-	}
-	write("pr-view", f.prView)
 	bin := filepath.Join(dir, "gh")
 	script := `#!/bin/sh
 dir='` + dir + `'
@@ -94,10 +93,10 @@ if test "$1" = pr && test "$2" = checks; then
   n=$(cat "$dir/pr-checks.count" 2>/dev/null || echo 0); echo $((n + 1)) > "$dir/pr-checks.count"
   cat "$dir/pr-checks"; exit 0
 fi
-if test "$1" = pr && test "$2" = view; then cat "$dir/pr-view"; exit 0; fi
-if test "$1" != api; then echo "unexpected: $*" >&2; exit 1; fi
 ep=
-for a in "$@"; do
+if test "$1" = pr && test "$2" = view; then ep=pr-view
+elif test "$1" != api; then echo "unexpected: $*" >&2; exit 1; fi
+test -n "$ep" || for a in "$@"; do
   case "$a" in
     *actions/runs*) ep=runs ;;
     *actions/workflows*) ep=workflows ;;
@@ -356,7 +355,7 @@ func TestCIWaitReportsNoChecksAfterTheWindow(t *testing.T) {
 // base. Where no check is required, the missing runs must not read as a head
 // without Actions CI that passes on its external check.
 func TestCIWaitStopsOnAConflictingHeadThatGotNoRuns(t *testing.T) {
-	fixture := func(prView string) ciFixture {
+	fixture := func(prView ...string) ciFixture {
 		return ciFixture{
 			prChecks: "secret-scan\tpass",
 			branch:   []string{noProtection},
@@ -375,6 +374,20 @@ func TestCIWaitStopsOnAConflictingHeadThatGotNoRuns(t *testing.T) {
 	if _, err := r.watchCI(); !errors.Is(err, ErrCIUnconfirmed) ||
 		!strings.Contains(err.Error(), "#42 conflicts with main") {
 		t.Fatalf("watchCI = %v, want ErrCIUnconfirmed naming the conflict", err)
+	}
+
+	// GitHub forgets the mergeability when the base moves and answers UNKNOWN
+	// until it has computed it again.
+	bin, asked := fixture(prViewJSON("abc123", "UNKNOWN"), prViewJSON("abc123", "UNKNOWN"),
+		prViewJSON("abc123", "CONFLICTING")).install(t)
+	r = ciTestRun(t, bin)
+	r.timing = fastCIWait(50 * time.Millisecond)
+	if _, err := r.watchCI(); !errors.Is(err, ErrCIUnconfirmed) ||
+		!strings.Contains(err.Error(), "#42 conflicts with main") {
+		t.Fatalf("watchCI after an unknown mergeability = %v, want ErrCIUnconfirmed naming the conflict", err)
+	}
+	if n := asked("pr-view"); n != 3 {
+		t.Fatalf("mergeability asked %d times, want 3", n)
 	}
 
 	// A conflict GitHub reports for another head says nothing about this one.
@@ -397,7 +410,7 @@ func TestCIWaitNamesTheConflictBehindAMissingRequiredCheck(t *testing.T) {
 		statuses: []string{externalOnly},
 		runs:     []string{noRuns},
 		flows:    []string{someWorkflow},
-		prView:   prViewJSON("abc123", "CONFLICTING"),
+		prView:   []string{prViewJSON("abc123", "CONFLICTING")},
 	}.install(t)
 	r := ciTestRun(t, bin)
 	r.timing = fastCIWait(50 * time.Millisecond)

@@ -257,16 +257,29 @@ func (g G) UnmergedFiles(ctx context.Context, dir string) (string, error) {
 
 // MergeConflicts reports whether merging theirs into ours would conflict,
 // without touching the worktree or the index.
+//
+// It reads the full merge instead of asking `git merge-tree --quiet`. The
+// quiet mode stops at the first conflict and answers through its exit status
+// alone, and git 2.54 exits 0 from it when the two sides also changed
+// different files of a directory that sorts after the conflicting path: a
+// conflicting merge then reads as clean. A real merge that conflicts exits 1
+// after printing its tree; an exit 1 without one is a merge git could not
+// start, such as an unknown revision.
 func (g G) MergeConflicts(ctx context.Context, dir, ours, theirs string) (bool, error) {
-	err := g.start(ctx, dir, nil, nil, "merge-tree", "--write-tree", "--quiet", ours, theirs)
+	var stdout, stderr bytes.Buffer
+	err := g.start(ctx, dir, &stdout, &stderr, "merge-tree", "--write-tree", "--name-only", ours, theirs)
 	if err == nil {
 		return false, nil
 	}
 	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+	if errors.As(err, &ee) && ee.ExitCode() == 1 && stdout.Len() > 0 {
 		return true, nil
 	}
-	return false, fmt.Errorf("git merge-tree: %v", err)
+	msg := strings.TrimSpace(stderr.String())
+	if msg == "" {
+		msg = err.Error()
+	}
+	return false, fmt.Errorf("git merge-tree: %s", firstline.Trimmed(msg))
 }
 
 // IsAncestor reports whether ancestor is reachable from descendant. It is how
