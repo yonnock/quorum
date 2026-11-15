@@ -142,9 +142,15 @@ wait, does not count against `--max-iter`, and only gates:
   follows, because a suggestion round that reopened the loop would never end.
 - A CI fix after the suggestion round cancels the review and starts it again
   for the repaired head, like any other CI fix.
+- The base is checked once more before the run ends, also when the suggestion
+  round changed nothing. A base update goes through CI and the same gate. A
+  base that moves a fourth time stops the run with exit 4, on a head it does
+  not call reviewed.
 
 Without auto-merge no such review runs, the commits stay unreviewed, and the
 run reports ready. An offline run does the same review before its single push.
+Once its suggestion round has run, a push repair, a CI repair or a base update
+that moves the head is reviewed by the same gate instead of a new fix round.
 
 After a posted PR run converges with green CI, a fresh read-only pass on the
 review model writes a local PR-description candidate. It receives the precomputed diff and

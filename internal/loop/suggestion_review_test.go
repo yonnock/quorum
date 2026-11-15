@@ -464,3 +464,32 @@ exec '`+green+`' "$@"`))
 		}
 	}
 }
+
+// A base that moves during every review would otherwise have the run review
+// and wait for CI forever. It stops after a few rounds, on a head it does not
+// call reviewed.
+func TestTerminalReviewGivesUpOnABaseThatKeepsMoving(t *testing.T) {
+	s := newSuggestionRun(t, review.Findings{Posted: true})
+	s.o.BaseUpdateOnConflict = false
+	s.afterReview = func() {
+		s.f.write("base.txt", fmt.Sprintf("base after review %d\n", len(s.reviewed)))
+		s.f.git(s.f.clone, "commit", "-q", "-am", "advance base")
+		s.f.git(s.f.clone, "push", "-q", "origin", "main")
+	}
+	res := &Result{Converged: true, Rounds: 1, LastFindings: s.clean}
+
+	err := s.terminalSuggestions(res, 1, s.clean, "clean", s.f.featureSHA)
+	if !errors.Is(err, ErrNotConverged) || !strings.Contains(err.Error(), "main moved") {
+		t.Fatalf("terminalSuggestions = %v, want ErrNotConverged naming the moving base", err)
+	}
+	if len(s.reviewed) != terminalBaseUpdates+1 {
+		t.Fatalf("reviews = %d, want %d", len(s.reviewed), terminalBaseUpdates+1)
+	}
+	if res.Converged || !res.SuggestionCommits || s.review != nil {
+		t.Fatalf("converged = %v, unreviewed head = %v, review = %v; want an unconverged run on an unreviewed head", res.Converged, res.SuggestionCommits, s.review)
+	}
+	pushed := s.f.git(s.f.origin, "rev-parse", "refs/heads/feature")
+	if res.LastFindings.HeadSHA == pushed {
+		t.Fatalf("the last review claims the unreviewed head %s", pushed)
+	}
+}

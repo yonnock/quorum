@@ -43,7 +43,7 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 			return false, err
 		}
 	}
-	for {
+	for updates := 1; ; updates++ {
 		current, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
 		if err != nil {
 			return false, err
@@ -121,6 +121,9 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 				r.rep.Info("base branch advanced during CI; reviewing the updated head")
 				if !terminalSuggestion {
 					return false, nil
+				}
+				if updates > terminalBaseUpdates {
+					return false, r.errBaseKeptMoving(res)
 				}
 				if comment, err = r.reviewSuggestionCommits(res, round+1); err != nil {
 					return false, err

@@ -865,7 +865,7 @@ func (r *run) terminalSuggestions(res *Result, round int, findings review.Findin
 	if err != nil || !r.verifiesSuggestionRound() {
 		return err
 	}
-	for {
+	for updates := 1; ; updates++ {
 		if pushed {
 			round++
 			if _, err := r.reviewSuggestionCommits(res, round); err != nil {
@@ -881,12 +881,29 @@ func (r *run) terminalSuggestions(res *Result, round int, findings review.Findin
 		}
 		res.SuggestionCommits = true
 		pushed = true
+		if updates > terminalBaseUpdates {
+			return r.errBaseKeptMoving(res)
+		}
 		r.startReviewWith(round+1, "")
 		if err := r.ensureCIGreen(); err != nil {
 			r.killReview()
 			return err
 		}
 	}
+}
+
+// terminalBaseUpdates bounds how often a base that moved sends the head the
+// run ends on through another review. Every round of it costs a review and a
+// CI run, and in a busy repository the base moves faster than both finish;
+// the ordinary rounds have --max-iter for the same reason.
+const terminalBaseUpdates = 3
+
+// errBaseKeptMoving ends a run whose last head is a base update no review
+// has seen, after terminalBaseUpdates of them were reviewed in vain.
+func (r *run) errBaseKeptMoving(res *Result) error {
+	res.Converged = false
+	return fmt.Errorf("%w: %s moved %d times while the suggestion round was being reviewed, and its last update is unreviewed; run again: %s",
+		ErrNotConverged, r.pr.BaseRefName, terminalBaseUpdates+1, r.targetReference())
 }
 
 // verifiesSuggestionRound reports whether the commits of the suggestion round
