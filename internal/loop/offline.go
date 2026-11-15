@@ -65,11 +65,16 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 			if !terminalSuggestion {
 				return false, nil
 			}
+			if updates > terminalBaseUpdates {
+				return false, r.errBaseKeptMoving(res)
+			}
 			if comment, err = r.reviewSuggestionCommits(res, round+1); err != nil {
 				return false, err
 			}
 			findings, round = res.LastFindings, round+1
-			current = findings.HeadSHA
+			// The base may have moved again during that review, and a
+			// branch without a pull request gets no later check of it.
+			continue
 		}
 
 		r.rep.Step("Push")

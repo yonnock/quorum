@@ -493,3 +493,35 @@ func TestTerminalReviewGivesUpOnABaseThatKeepsMoving(t *testing.T) {
 		t.Fatalf("the last review claims the unreviewed head %s", pushed)
 	}
 }
+
+// A branch without a pull request has no CI wait, and with it no base check
+// after the push. The review of a base update must therefore be followed by
+// another look at the base before anything is pushed: a base that moved
+// during that review would otherwise be reported as converged on.
+func TestOfflineBranchOnlyBaseIsRecheckedAfterItsTerminalReview(t *testing.T) {
+	s := newSuggestionRun(t, review.Findings{})
+	s.o.Offline = true
+	s.target = target.Target{BranchOnly: true}
+	s.f.advanceBase()
+	s.afterReview = func() {
+		if len(s.reviewed) == 1 {
+			s.f.write("base.txt", "base moved during the review\n")
+			s.f.git(s.f.clone, "commit", "-q", "-am", "advance base again")
+			s.f.git(s.f.clone, "push", "-q", "origin", "main")
+		}
+	}
+	res := &Result{Rounds: 1, LastFindings: s.clean}
+
+	settled, err := s.finalizeOffline(res, 1, s.clean, "stale")
+	if err != nil || !settled {
+		t.Fatalf("finalizeOffline = %v, %v; want the run settled", settled, err)
+	}
+	pushed := s.f.git(s.f.origin, "rev-parse", "refs/heads/feature")
+	base := s.f.git(s.f.origin, "rev-parse", "refs/heads/main")
+	if !s.f.contains(base, pushed) {
+		t.Fatalf("the pushed head %s does not contain the base %s that moved during its review", pushed, base)
+	}
+	if len(s.reviewed) != 2 || res.LastFindings.HeadSHA != pushed {
+		t.Fatalf("reviewed = %v, findings head = %s; want both base updates reviewed and %s the last", s.reviewed, res.LastFindings.HeadSHA, pushed)
+	}
+}
