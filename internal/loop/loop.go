@@ -862,11 +862,31 @@ func suggestionRoundDue(o Options, f review.Findings) bool {
 func (r *run) terminalSuggestions(res *Result, round int, findings review.Findings, comment, preSHA string) error {
 	pushed, err := r.suggestionRound(round, findings, comment, preSHA)
 	res.SuggestionCommits = pushed
-	if err != nil || !pushed || !r.verifiesSuggestionRound() {
+	if err != nil || !r.verifiesSuggestionRound() {
 		return err
 	}
-	_, err = r.reviewSuggestionCommits(res, round+1)
-	return err
+	for {
+		if pushed {
+			round++
+			if _, err := r.reviewSuggestionCommits(res, round); err != nil {
+				return err
+			}
+		}
+		// The base can advance during either the suggestion round or its
+		// review, even when the suggestion round changed nothing. Any merge
+		// must pass CI and the same terminal review gate before it counts.
+		updated, err := r.ensureBaseCurrent()
+		if err != nil || !updated {
+			return err
+		}
+		res.SuggestionCommits = true
+		pushed = true
+		r.startReviewWith(round+1, "")
+		if err := r.ensureCIGreen(); err != nil {
+			r.killReview()
+			return err
+		}
+	}
 }
 
 // verifiesSuggestionRound reports whether the commits of the suggestion round

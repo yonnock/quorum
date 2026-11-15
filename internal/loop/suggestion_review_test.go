@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,7 +59,8 @@ type suggestionRun struct {
 	clean    review.Findings
 	reviewed []string // the heads the reviewer was asked for
 	// later, when set, is what every review after the first finds.
-	later *review.Findings
+	later       *review.Findings
+	afterReview func()
 }
 
 // newSuggestionRun builds the run. verdict is what the review of the
@@ -100,6 +102,9 @@ printf 'done\n\nPR COMMENT:\nTook the suggestion.\n' > "$out"`)
 			found = *s.later
 		}
 		found.PR, found.HeadSHA = 42, head
+		if s.afterReview != nil {
+			s.afterReview()
+		}
 		return &review.Result{Findings: found, CommentBody: "## Summary\n\nreview of " + head + "\n"}, nil
 	})
 	r := f.run(reviewer, 6)
@@ -304,5 +309,158 @@ func TestOfflinePushRepairReviewWithABlockerStartsNoFixRound(t *testing.T) {
 	}
 	if res.LastFindings.MergeEligible() {
 		t.Fatalf("findings = %+v; a head with a blocker must stay unmergeable", res.LastFindings)
+	}
+}
+
+func TestTerminalSuggestionReviewIncludesTheLatestBase(t *testing.T) {
+	for _, phase := range []string{"suggestion round", "verification review", "unchanged suggestion round"} {
+		t.Run(phase, func(t *testing.T) {
+			s := newSuggestionRun(t, review.Findings{Posted: true})
+			res := &Result{Converged: true, Rounds: 1, LastFindings: s.clean}
+			var base string
+			switch phase {
+			case "suggestion round":
+				base = s.f.advanceBase()
+			case "verification review":
+				s.afterReview = func() {
+					if len(s.reviewed) == 1 {
+						base = s.f.advanceBase()
+					}
+				}
+			case "unchanged suggestion round":
+				s.fixer = codex.Options{Bin: writeTool(t, "codex", `
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$a"; fi
+  prev="$a"
+done
+printf 'No change needed.\n' > "$out"`)}
+				base = s.f.advanceBase()
+			}
+			if err := s.terminalSuggestions(res, 1, s.clean, "clean", s.f.featureSHA); err != nil {
+				t.Fatal(err)
+			}
+			pushed := s.f.git(s.f.origin, "rev-parse", "refs/heads/feature")
+			if !s.f.contains(base, pushed) {
+				t.Fatalf("terminal head %s does not contain the latest base %s", pushed, base)
+			}
+			if res.LastFindings.HeadSHA != pushed || !res.LastFindings.MergeEligible() || res.SuggestionCommits {
+				t.Fatalf("result = %+v; want a merge-eligible review of the base update", res)
+			}
+			if s.review != nil || s.prog.CI != CIGreen {
+				t.Fatalf("review = %v, CI = %s; want a joined review and green CI", s.review, s.prog.CI)
+			}
+		})
+	}
+}
+
+func TestTerminalBaseUpdateReviewWithABlockerStartsNoFixRound(t *testing.T) {
+	s := newSuggestionRun(t, review.Findings{Posted: true})
+	s.f.advanceBase()
+	s.later = &review.Findings{Posted: true, Blockers: 1}
+	res := &Result{Converged: true, Rounds: 1, LastFindings: s.clean}
+	err := s.terminalSuggestions(res, 1, s.clean, "clean", s.f.featureSHA)
+	if !errors.Is(err, ErrNotConverged) || res.Converged {
+		t.Fatalf("terminalSuggestions = %v, converged = %v; want ErrNotConverged", err, res.Converged)
+	}
+	if got := s.sessionCount(t); got != 1 {
+		t.Fatalf("fix sessions = %d, want only the suggestion round", got)
+	}
+}
+
+func TestOfflineCIRepairStaysInTheTerminalSuggestionGate(t *testing.T) {
+	for _, blockers := range []int{0, 1} {
+		t.Run(fmt.Sprintf("blockers-%d", blockers), func(t *testing.T) {
+			s := newSuggestionRun(t, review.Findings{})
+			s.o.Offline = true
+			s.o.MaxIter = 1
+			s.later = &review.Findings{Blockers: blockers}
+			green := s.p.GH.Bin
+			s.p.GH = gh.New(writeTool(t, "gh", `
+if test "$1 $2" = "pr checks" && ! git -C '`+s.f.origin+`' cat-file -e refs/heads/feature:repaired.txt 2>/dev/null; then
+  case "$*" in
+    *--json*) echo '[{"name":"ci-gate","bucket":"fail"}]' ;;
+    *) printf 'ci-gate\tfail\n' ;;
+  esac
+  exit 1
+fi
+exec '`+green+`' "$@"`))
+			res := &Result{Rounds: 1, LastFindings: s.clean}
+			settled, err := s.finalizeOffline(res, 1, s.clean, "stale")
+			if blockers > 0 {
+				if settled || !errors.Is(err, ErrNotConverged) {
+					t.Fatalf("finalizeOffline = %v, %v; want ErrNotConverged", settled, err)
+				}
+			} else if !settled || err != nil {
+				t.Fatalf("finalizeOffline = %v, %v; want the run settled", settled, err)
+			}
+			pushed := s.f.git(s.f.origin, "rev-parse", "refs/heads/feature")
+			if len(s.reviewed) != 2 || s.reviewed[1] != pushed || res.LastFindings.HeadSHA != pushed {
+				t.Fatalf("reviewed = %v, findings = %+v; want the repaired head %s reviewed", s.reviewed, res.LastFindings, pushed)
+			}
+			if got := s.sessionCount(t); got != 2 {
+				t.Fatalf("fix sessions = %d, want the suggestion round and CI repair only", got)
+			}
+			if blockers == 0 {
+				posted, _ := os.ReadFile(s.comments)
+				if !strings.Contains(string(posted), "review of "+pushed) || strings.Contains(string(posted), "review of "+s.reviewed[0]) {
+					t.Fatalf("posted comments do not carry exactly the repaired head's review:\n%s", posted)
+				}
+			}
+		})
+	}
+}
+
+func TestOfflineBaseUpdateStaysInTheTerminalSuggestionGate(t *testing.T) {
+	for _, phase := range []string{"verification review", "CI wait"} {
+		for _, blockers := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%s/blockers-%d", phase, blockers), func(t *testing.T) {
+				s := newSuggestionRun(t, review.Findings{})
+				s.o.Offline = true
+				s.o.MaxIter = 1
+				s.later = &review.Findings{Blockers: blockers}
+				if phase == "verification review" {
+					s.afterReview = func() {
+						if len(s.reviewed) == 1 {
+							s.f.advanceBase()
+						}
+					}
+				} else {
+					green := s.p.GH.Bin
+					marker := filepath.Join(t.TempDir(), "advanced")
+					s.p.GH = gh.New(writeTool(t, "gh", `
+if test "$1 $2" = "pr checks" && ! test -f '`+marker+`'; then
+  printf 'advanced base\n' > '`+s.f.clone+`/base.txt'
+  git -C '`+s.f.clone+`' commit -q -am 'advance base during CI'
+  git -C '`+s.f.clone+`' push -q origin main
+  touch '`+marker+`'
+fi
+exec '`+green+`' "$@"`))
+				}
+				res := &Result{Rounds: 1, LastFindings: s.clean}
+				settled, err := s.finalizeOffline(res, 1, s.clean, "stale")
+				if blockers > 0 {
+					if settled || !errors.Is(err, ErrNotConverged) {
+						t.Fatalf("finalizeOffline = %v, %v; want ErrNotConverged", settled, err)
+					}
+				} else {
+					if !settled || err != nil {
+						t.Fatalf("finalizeOffline = %v, %v; want the run settled", settled, err)
+					}
+					pushed := s.f.git(s.f.origin, "rev-parse", "refs/heads/feature")
+					base := s.f.git(s.f.origin, "rev-parse", "refs/heads/main")
+					if !s.f.contains(base, pushed) || res.LastFindings.HeadSHA != pushed || !res.LastFindings.MergeEligible() {
+						t.Fatalf("findings = %+v; want a posted review of %s including base %s", res.LastFindings, pushed, base)
+					}
+				}
+				if len(s.reviewed) != 2 || s.review != nil {
+					t.Fatalf("reviewed = %v, active = %v; want two completed reviews", s.reviewed, s.review)
+				}
+				if got := s.sessionCount(t); got != 1 {
+					t.Fatalf("fix sessions = %d, want the suggestion round only", got)
+				}
+			})
+		}
 	}
 }
