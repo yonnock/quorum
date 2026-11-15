@@ -106,8 +106,11 @@ reporting without breaking the build.
   go to each fix round once. Making either of them blocking prevents
   convergence. The one terminal exception: after a clean final review,
   `FIX_SUGGESTIONS` runs a single triage round over the leftover Suggestions,
-  with no review after it; it must never re-enter the loop, and commits it
-  pushes disqualify the head from auto-merge.
+  once per run; it must never re-enter the loop. Commits it pushes disqualify
+  the head from auto-merge until a review has seen them. Only a run that is
+  going to merge pays for that review (`VerifySuggestionRound`); it gates and
+  nothing else: a Blocker or Critical in it ends the run with
+  `ErrNotConverged` instead of starting a fix round.
 - **Fix sessions run with the sandbox bypassed** (`--sandboxed` opts out). They
   push and run tests unattended, which a sandboxed `codex exec` would silently
   skip. Reviews never get the bypass and run read-only.

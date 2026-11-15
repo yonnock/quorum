@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/yungweng/quorum/internal/codex"
 	"github.com/yungweng/quorum/internal/gh"
+	"github.com/yungweng/quorum/internal/review"
 	"github.com/yungweng/quorum/internal/target"
 )
 
@@ -148,6 +150,48 @@ func TestCIFixThatConflictsWithTheBaseIsMergedBeforeItsCIWait(t *testing.T) {
 	}
 	if r.prog.CI != CIGreen {
 		t.Fatalf("CI = %q, want %q", r.prog.CI, CIGreen)
+	}
+	if r.review != nil {
+		t.Fatal("a CI wait that had no review beside it started one")
+	}
+}
+
+// heldReviewer announces every review it is asked for and holds it until its
+// context ends, the way a review outlasts a short CI wait.
+type heldReviewer struct{ started chan struct{} }
+
+func (f *heldReviewer) Run(ctx context.Context, _ review.Options) (*review.Result, error) {
+	f.started <- struct{}{}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A CI fix cancels the review of the outgoing head. The wait for the repaired
+// head's checks suits a review as well as the first wait did: a run that
+// starts it only once CI is green queues a whole review behind every fix.
+func TestCIFixRestartsTheReviewBesideItsCIWait(t *testing.T) {
+	f := newBaseUpdateRepo(t)
+	r := ciConflictRun(t, f)
+	reviewer := &heldReviewer{started: make(chan struct{}, 4)}
+	r.p.Review = reviewer
+	r.startReviewWith(2, "")
+	defer r.killReview()
+
+	if err := r.ensureCIGreen(); err != nil {
+		t.Fatalf("ensureCIGreen = %v, want CI green after the fix", err)
+	}
+	if r.review == nil {
+		t.Fatal("the CI wait after the fix ran without a review of the repaired head")
+	}
+	if r.review.round != 2 {
+		t.Fatalf("restarted review is for round %d, want the cancelled round 2", r.review.round)
+	}
+	for _, which := range []string{"the review of the outgoing head", "the review of the repaired head"} {
+		select {
+		case <-reviewer.started:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s never started", which)
+		}
 	}
 }
 

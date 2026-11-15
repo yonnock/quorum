@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/yungweng/quorum/internal/cachefs"
 	"github.com/yungweng/quorum/internal/firstline"
@@ -27,6 +28,9 @@ import (
 type G struct {
 	Bin       string
 	hooksPath string
+	// backoff is the wait before a remote read is repeated, times the attempt.
+	// Zero means remoteReadBackoff.
+	backoff time.Duration
 }
 
 func New(bin string) G {
@@ -58,6 +62,13 @@ func (g G) start(ctx context.Context, dir string, stdout, stderr io.Writer, args
 }
 
 func (g G) run(ctx context.Context, dir string, args ...string) (string, error) {
+	out, _, err := g.runStderr(ctx, dir, args...)
+	return out, err
+}
+
+// runStderr is run that also returns everything a failed git wrote to stderr;
+// the error itself only has room for the first line.
+func (g G) runStderr(ctx context.Context, dir string, args ...string) (string, string, error) {
 	args = g.args(args)
 	var stdout, stderr bytes.Buffer
 	if err := g.start(ctx, dir, &stdout, &stderr, args...); err != nil {
@@ -65,9 +76,67 @@ func (g G) run(ctx context.Context, dir string, args ...string) (string, error) 
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), firstline.Trimmed(msg))
+		return "", msg, fmt.Errorf("git %s: %s", strings.Join(args, " "), firstline.Trimmed(msg))
 	}
-	return strings.TrimSpace(stdout.String()), nil
+	return strings.TrimSpace(stdout.String()), "", nil
+}
+
+// A remote read is asked remoteReadAttempts times before its failure counts,
+// with remoteReadBackoff times the attempt in between: 12 seconds in all.
+const (
+	remoteReadAttempts = 4
+	remoteReadBackoff  = 2 * time.Second
+)
+
+// networkSigns are matched against git's stderr. Like the GitHub client's
+// list they are deliberately narrow: a missing repository or a refused
+// credential must not look retryable.
+var networkSigns = []string{
+	"could not resolve host",
+	"temporary failure in name resolution",
+	"failed to connect to",
+	"connection timed out",
+	"operation timed out",
+	"connection reset",
+	"connection refused",
+	"tls handshake",
+	"ssl_error_syscall",
+	"unexpected disconnect",
+	"early eof",
+	"the requested url returned error: 5",
+}
+
+func networkFailure(stderr string) bool {
+	low := strings.ToLower(stderr)
+	for _, sign := range networkSigns {
+		if strings.Contains(low, sign) {
+			return true
+		}
+	}
+	return false
+}
+
+// runRemoteRead runs a command that only reads from the remote, and repeats it
+// while the failure is the network's. A run that is an hour in asks the remote
+// for a ref dozens of times; one name lookup that fails for a second must not
+// end it. Never use this for a push: a hook may already have run, and a
+// request that failed late may still have reached the remote.
+func (g G) runRemoteRead(ctx context.Context, dir string, args ...string) (string, error) {
+	backoff := g.backoff
+	if backoff == 0 {
+		backoff = remoteReadBackoff
+	}
+	for attempt := 1; ; attempt++ {
+		out, stderr, err := g.runStderr(ctx, dir, args...)
+		if err == nil || attempt == remoteReadAttempts || ctx.Err() != nil || !networkFailure(stderr) {
+			return out, err
+		}
+		select {
+		case <-time.After(time.Duration(attempt) * backoff):
+		case <-ctx.Done():
+			return "", err
+		}
+	}
 }
 
 // runCombined is for commands whose output matters even when they fail, such as
@@ -93,7 +162,7 @@ func (g G) CurrentBranch(ctx context.Context, dir string) (string, error) {
 }
 
 func (g G) Fetch(ctx context.Context, dir, remote, refspec string) error {
-	_, err := g.run(ctx, dir, "fetch", "-q", remote, refspec)
+	_, err := g.runRemoteRead(ctx, dir, "fetch", "-q", remote, refspec)
 	return err
 }
 
@@ -101,7 +170,7 @@ func (g G) Fetch(ctx context.Context, dir, remote, refspec string) error {
 // when the branch was rewritten.
 // FetchAll refreshes every branch of origin and drops the ones deleted there.
 func (g G) FetchAll(ctx context.Context, dir string) error {
-	_, err := g.run(ctx, dir, "fetch", "--prune", "--quiet", "origin")
+	_, err := g.runRemoteRead(ctx, dir, "fetch", "--prune", "--quiet", "origin")
 	return err
 }
 
@@ -126,7 +195,7 @@ func (e refNotFoundError) Is(target error) bool { return target == ErrRefNotFoun
 // This is how head drift is detected: the local worktree cannot answer it.
 // A ref the remote does not have is reported as ErrRefNotFound.
 func (g G) LsRemote(ctx context.Context, dir, remote, ref string) (string, error) {
-	out, err := g.run(ctx, dir, "ls-remote", remote, ref)
+	out, err := g.runRemoteRead(ctx, dir, "ls-remote", remote, ref)
 	if err != nil {
 		return "", err
 	}
@@ -135,6 +204,16 @@ func (g G) LsRemote(ctx context.Context, dir, remote, ref string) (string, error
 		return "", refNotFoundError{ref: ref, remote: remote}
 	}
 	return sha, nil
+}
+
+// TrackedFiles lists every path the index of dir tracks, relative to the
+// repository root.
+func (g G) TrackedFiles(ctx context.Context, dir string) ([]string, error) {
+	out, err := g.run(ctx, dir, "ls-files", "-z", "--full-name")
+	if err != nil {
+		return nil, err
+	}
+	return strings.FieldsFunc(out, func(r rune) bool { return r == 0 }), nil
 }
 
 // ShowFile returns a tracked file's content at rev. ok is false when the path

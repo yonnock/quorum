@@ -27,6 +27,15 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 		if err != nil {
 			return false, err
 		}
+		if pushed && r.verifiesSuggestionRound() {
+			// Reviewed here, before the push: the review that follows is
+			// then the one whose comment the run posts and whose head it
+			// publishes.
+			if comment, err = r.reviewSuggestionCommits(res, round+1); err != nil {
+				return false, err
+			}
+			findings, round = res.LastFindings, round+1
+		}
 	}
 	if !terminalSuggestion {
 		if err := r.ensureTestsGreen(); err != nil {
@@ -60,6 +69,23 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 	}
 	if err := r.flushFixComments(); err != nil {
 		return false, err
+	}
+	// A push the repository's own verification refused is repaired by a fix
+	// session, and its commit is one the review has not seen either. Ending
+	// here would leave the review without a head to post to, and a run that
+	// was going to merge would end unmerged without a word.
+	if current == findings.HeadSHA && r.headSHA != current {
+		r.rep.Info("push repairs moved the head past the reviewed commit; reviewing the repaired head")
+		if !terminalSuggestion {
+			return false, nil
+		}
+		// After the suggestion round the review of the repaired head gates
+		// like the one before it: handing it to the loop would let a
+		// finding start the fix round a suggestion round must not have.
+		if comment, err = r.reviewSuggestionCommits(res, round+1); err != nil {
+			return false, err
+		}
+		findings, round = res.LastFindings, round+1
 	}
 
 	if !r.target.BranchOnly {

@@ -180,8 +180,14 @@ type Options struct {
 	BaseUpdateOnConflict bool
 	// FixSuggestions runs one terminal fix round when the final review is
 	// clean but still lists Suggestions: triage each one, implement what is
-	// worth it, and end the run without another review.
+	// worth it, and end the run without another fix round.
 	FixSuggestions bool
+	// VerifySuggestionRound has one more review cover the commits the
+	// suggestion round pushed, so the head the run ends on is a reviewed one.
+	// Callers set it when they are going to merge that head. The review only
+	// gates: a Blocker or Critical in it ends the run, and no fix round
+	// follows, which keeps the suggestion round terminal.
+	VerifySuggestionRound bool
 	// ResumeRun reuses a prior review run's completed reviewer output for the
 	// first review round, the way a failed round's in-run retry does. Later
 	// rounds always fan out fresh: they review a head the saved output has
@@ -237,7 +243,8 @@ type Result struct {
 	Duration             time.Duration
 	// SuggestionCommits records that the terminal suggestion round pushed
 	// commits the final review has never seen. Auto-merge must skip such a
-	// head: the approval would claim a review that did not happen.
+	// head: the approval would claim a review that did not happen. It is
+	// false again once VerifySuggestionRound had those commits reviewed.
 	SuggestionCommits    bool
 	LastFindings         review.Findings
 	Divergence           *DivergenceReport
@@ -650,9 +657,7 @@ func (r *run) execute() (*Result, error) {
 			}
 			res.Converged = true
 			if suggestionRoundDue(r.o, findings) {
-				pushed, err := r.suggestionRound(iteration, findings, comment, currentSHA)
-				res.SuggestionCommits = pushed
-				if err != nil {
+				if err := r.terminalSuggestions(res, iteration, findings, comment, currentSHA); err != nil {
 					return res, err
 				}
 			}
@@ -852,6 +857,62 @@ func suggestionRoundDue(o Options, f review.Findings) bool {
 	return o.FixSuggestions && f.Blocking() == 0 && f.Suggestions > 0
 }
 
+// terminalSuggestions ends an online run on its suggestion round and, when
+// the caller is going to merge, on the review of what that round pushed.
+func (r *run) terminalSuggestions(res *Result, round int, findings review.Findings, comment, preSHA string) error {
+	pushed, err := r.suggestionRound(round, findings, comment, preSHA)
+	res.SuggestionCommits = pushed
+	if err != nil || !pushed || !r.verifiesSuggestionRound() {
+		return err
+	}
+	_, err = r.reviewSuggestionCommits(res, round+1)
+	return err
+}
+
+// verifiesSuggestionRound reports whether the commits of the suggestion round
+// get a review of their own. Only a pull request can be merged, and only one
+// that is posted to and no longer a draft.
+func (r *run) verifiesSuggestionRound() bool {
+	return r.o.VerifySuggestionRound && r.o.Post && !r.target.BranchOnly && !r.pr.IsDraft
+}
+
+// reviewSuggestionCommits joins the review of the head the suggestion round
+// left behind and makes it the run's final review. It returns the comment an
+// offline run still has to post.
+//
+// The review gates and nothing else. Its Suggestions are not handed to
+// anyone, and a Blocker or Critical ends the run instead of starting a fix
+// round: a suggestion round that could reopen the loop would have the run
+// chase every new batch of Suggestions and never converge.
+func (r *run) reviewSuggestionCommits(res *Result, round int) (string, error) {
+	r.rep.Step("Review of the suggestion round")
+	r.enter(PhaseReview)
+	findings, comment, err := r.finishReview(round)
+	if err != nil {
+		return "", err
+	}
+	head, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+	if err != nil {
+		return "", err
+	}
+	if findings.HeadSHA != head {
+		return "", fmt.Errorf("the review is for %s but the branch is at %s", findings.HeadSHA, head)
+	}
+	r.rep.RoundResult(round, findings, findings.Blocking() == 0)
+	res.Rounds = round
+	res.LastFindings = findings
+	r.prog.Blockers = findings.Blockers
+	r.prog.Critical = findings.Critical
+	r.publish()
+	if findings.Blocking() > 0 {
+		res.Converged = false
+		return "", fmt.Errorf("%w: the review of the suggestion round's commits found %s, and no fix round follows a suggestion round; a human is needed: %s",
+			ErrNotConverged, findings.Summary(), r.targetReference())
+	}
+	res.SuggestionCommits = false
+	return comment, nil
+}
+
 // suggestionRound is the one fix step allowed to run after convergence, when
 // the clean final review still left Suggestions on the table. It triages
 // rather than obeys: leftover Suggestions are often artifacts of the
@@ -886,10 +947,16 @@ func (r *run) suggestionRound(round int, findings review.Findings, comment, preS
 		fmt.Sprintf("Review round %d", round), findingsCommentURL(findings), preSHA); err != nil {
 		return true, err
 	}
+	// The review of these commits needs the pushed head, not green checks,
+	// so it runs beside the wait below. The caller joins it.
+	if r.verifiesSuggestionRound() {
+		r.startReviewWith(round+1, "")
+	}
 	// The run still ends on this push, so the same barrier as any other round
 	// applies: babysit must not report success on a head whose checks are red.
 	if !r.target.BranchOnly {
 		if err := r.ensureFinalCIGreen(); err != nil {
+			r.killReview()
 			return true, err
 		}
 	}
@@ -1266,7 +1333,14 @@ func (r *run) postPRComment(kind, body, generatedURL string) (string, bool) {
 		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment body is empty", kind, r.pr.Number))
 		return "", false
 	}
-	if term := prohibitedPRCommentTermExcept(body, generatedURL); term != "" {
+	term := prohibitedPRCommentTermExcept(body, generatedURL)
+	if term != "" {
+		// A fix log names the files it touched, and a repository may track
+		// AGENTS.md or scripts/check-agent-context.json. Only what the comment
+		// says beyond those paths decides.
+		term = prohibitedPRCommentTermExcept(withoutRepoPaths(body, r.trackedPaths()), generatedURL)
+	}
+	if term != "" {
 		r.rep.Warn(fmt.Sprintf("could not post the %s to PR #%d: the comment contains prohibited term %q", kind, r.pr.Number, term))
 		return "", false
 	}
@@ -1300,6 +1374,63 @@ func prohibitedPRCommentTermExcept(text, generatedURL string) string {
 		}
 	}
 	return ""
+}
+
+// trackedPaths lists what the worktree's head tracks. A run without a worktree
+// and a failed listing both answer with nothing, which exempts nothing.
+func (r *run) trackedPaths() []string {
+	if r.worktree == "" {
+		return nil
+	}
+	paths, err := r.p.Git.TrackedFiles(r.ctx, r.worktree)
+	if err != nil {
+		return nil
+	}
+	return paths
+}
+
+// withoutRepoPaths drops the words of text that name a file or directory the
+// repository tracks, so the check that follows reads only what the comment
+// says in its own words. Words the check would pass anyway are left alone.
+func withoutRepoPaths(text string, tracked []string) string {
+	if len(tracked) == 0 {
+		return text
+	}
+	var kept []string
+	for _, word := range strings.Fields(text) {
+		if prohibitedPRCommentTermExcept(word, "") != "" && namesRepoPath(word, tracked) {
+			continue
+		}
+		kept = append(kept, word)
+	}
+	return strings.Join(kept, " ")
+}
+
+// namesRepoPath reports whether word is a tracked path, written in full or
+// from any directory level down, optionally in Markdown code or emphasis
+// quotes and with a trailing line number. A word without a slash or a dot is
+// never a path here: `agents` must not pass because docs/agents exists.
+func namesRepoPath(word string, tracked []string) bool {
+	word = strings.Trim(word, "`'\"()<>*,;!?")
+	// Only a location may follow the path. Anything else behind the colon is
+	// text of its own, and dropping the word would hide it from the check.
+	if path, location, found := strings.Cut(word, ":"); found {
+		if strings.Trim(location, "0123456789:") != "" {
+			return false
+		}
+		word = path
+	}
+	word = strings.TrimPrefix(strings.TrimRight(word, "./`"), "./")
+	if !strings.ContainsAny(word, "/.") {
+		return false
+	}
+	for _, path := range tracked {
+		if path == word || strings.HasSuffix(path, "/"+word) ||
+			strings.HasPrefix(path, word+"/") || strings.Contains(path, "/"+word+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func fixCommentBody(label, reviewLabel, reviewURL, current, original, commits string) string {

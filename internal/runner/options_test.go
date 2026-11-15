@@ -104,13 +104,15 @@ func TestLoopOptionsMapsEveryConfigKey(t *testing.T) {
 		ResolveConflicts:     false,
 		BaseUpdateOnConflict: true,
 		FixSuggestions:       false,
-		Offline:              false,
-		Bypass:               false,
-		UseDirenv:            true,
-		RunsDir:              "/cache/babysit-runs",
-		DepsDir:              "/cache/deps",
-		Bins:                 tools.Engines,
-		DirenvBin:            "/bin/direnv",
+		// The agent merges only with AUTO_MERGE on, which this config leaves off.
+		VerifySuggestionRound: false,
+		Offline:               false,
+		Bypass:                false,
+		UseDirenv:             true,
+		RunsDir:               "/cache/babysit-runs",
+		DepsDir:               "/cache/deps",
+		Bins:                  tools.Engines,
+		DirenvBin:             "/bin/direnv",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("LoopOptions =\n%+v\nwant\n%+v", got, want)

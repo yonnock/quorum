@@ -47,7 +47,8 @@ type bgResult struct {
 // A review only needs the pushed PR head, not green checks, so it overlaps the
 // CI wait instead of queueing behind it. It must never overlap a fix
 // session: a fix moves the head sha out from under the findings, which is why
-// ensureCIGreen cancels a running review before it starts one.
+// ensureCIGreen cancels a running review before it starts one, and starts it
+// again for the repaired head once the fix is pushed.
 func (r *run) startReviewWith(round int, resumeDir string) {
 	if r.review != nil {
 		return
@@ -194,11 +195,12 @@ func (r *run) waitReview(br *bgReview, label string) bgResult {
 }
 
 // discardReview cancels a review whose findings a CI fix is about to invalidate
-// and waits for its processes to stop before the fix session starts.
-func (r *run) discardReview() {
+// and waits for its processes to stop before the fix session starts. It
+// reports the round of the review it cancelled, 0 when none was running.
+func (r *run) discardReview() int {
 	br := r.review
 	if br == nil {
-		return
+		return 0
 	}
 	r.review = nil
 	r.rep.Info("cancelling the review of the outgoing head")
@@ -206,6 +208,7 @@ func (r *run) discardReview() {
 	<-br.done
 	r.rep.StepEnd(fmt.Sprintf("Review round %d (cancelled)", br.round), r.reviewModel,
 		time.Since(br.started), true)
+	return br.round
 }
 
 // killReview cancels a running review outright. Used on the paths that end the
@@ -223,13 +226,14 @@ func (r *run) killReview() {
 // ensureCIGreen waits for the head's CI and hands a red result to a fix
 // session, at most MaxCIFixes times. After each pushed fix it brings the head
 // back in line with the base, so every caller must have a review follow it:
-// that review is what covers the merge.
+// that review is what covers the merge. A review the fix cancelled runs again
+// beside the wait for the repaired head.
 func (r *run) ensureCIGreen() error { return r.waitCIGreen(true) }
 
-// ensureFinalCIGreen is ensureCIGreen for the one wait no review follows, the
-// terminal suggestion round's. It never merges the base: reporting ready on a
-// base merge no review has seen is what the run refuses everywhere else. A
-// head left in conflict stops the wait with ErrCIUnconfirmed instead.
+// ensureFinalCIGreen is ensureCIGreen for the terminal suggestion round's
+// wait, which no review has to follow. It never merges the base: reporting
+// ready on a base merge no review has seen is what the run refuses everywhere
+// else. A head left in conflict stops the wait with ErrCIUnconfirmed instead.
 func (r *run) ensureFinalCIGreen() error { return r.waitCIGreen(false) }
 
 func (r *run) waitCIGreen(refreshBase bool) error {
@@ -266,7 +270,7 @@ func (r *run) waitCIGreen(refreshBase bool) error {
 
 		// The fix moves the head sha, so any review of the outgoing head is
 		// about to describe code that no longer exists.
-		r.discardReview()
+		reviewRound := r.discardReview()
 
 		fails, err := r.p.GH.FailingChecks(r.ctx, r.o.RepoRoot, r.pr.Number)
 		if err != nil {
@@ -300,6 +304,13 @@ func (r *run) waitCIGreen(refreshBase bool) error {
 			if err := r.refreshBaseAfterCIFix(); err != nil {
 				return err
 			}
+		}
+		// The cancelled review belongs beside this wait as it did beside the
+		// one before: it needs the pushed head, not green checks. Left to
+		// finishReview it would start only once CI is green, and every CI fix
+		// would cost the run a whole review on top of its CI round.
+		if reviewRound > 0 {
+			r.startReviewWith(reviewRound, "")
 		}
 	}
 }

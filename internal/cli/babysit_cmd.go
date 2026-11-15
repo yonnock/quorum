@@ -102,6 +102,9 @@ func (a *app) cmdBabysit(argv []string) int {
 	o.Local = args.boolean("local")
 	o.ResolveConflicts = o.ResolveConflicts && !args.boolean("no-resolve-conflicts")
 	o.FixSuggestions = o.FixSuggestions && !args.boolean("no-fix-suggestions")
+	// --auto-merge can turn merging on for this run alone, and a run that
+	// merges needs its suggestion round reviewed.
+	o.VerifySuggestionRound = autoMerge
 	o.DivergenceScan = o.DivergenceScan || args.boolean("divergence-scan")
 	if o.MaxIter, err = args.intVal(o.MaxIter, "max-iter"); err != nil {
 		return a.die("%v", err)

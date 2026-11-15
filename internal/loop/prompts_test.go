@@ -121,6 +121,18 @@ func TestFixPromptsTellTheSessionNotToWaitForCI(t *testing.T) {
 	}
 }
 
+// The pipeline stops watching at the first red check, so the list it hands
+// over can miss checks that fail a minute later. A session that fixes only
+// that list leaves the rest to another full CI round and fix attempt.
+func TestCIFixPromptAsksForTheChecksThatFailedSinceTheSnapshot(t *testing.T) {
+	prompt := ciFixPrompt(12, "[]")
+	for _, want := range []string{"first failure", "gh pr checks 12", "do not wait for checks that are still running"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("CI fix prompt is missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestPRFixPromptsRequireACommentBlock(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"ci fix":           ciFixPrompt(12, "[]"),
