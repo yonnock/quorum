@@ -106,14 +106,51 @@ wait that skips the update is the one after the suggestion round, because no
 review follows it. A head that conflicts there, or with base updates turned
 off, stops the run with exit 3 and a message that names the conflict.
 
+The review of a head runs beside the wait for its checks, not after it. A CI
+fix cancels that review, because its findings describe the outgoing head, and
+starts it again for the repaired head once the fix is pushed and the base
+update is done. A fix that leaves CI red therefore costs a cancelled review;
+one that turns it green has its review under way while the checks still run.
+
+The list of failing checks a CI fix session receives is taken at the first red
+check, while others may still be running. The session is told to read the
+checks again before it commits and to repair what failed in the meantime.
+
+A fix-log comment that names an AI, an agent, automation or a coding tool is
+not posted; the run prints a warning and continues. Paths the repository
+tracks are not counted, so a comment may say that it changed `AGENTS.md`.
+
+`git fetch` and `git ls-remote` are repeated up to four times over 12 seconds
+when the failure is the network's, such as a host name that does not resolve.
+
 When the final review comes back with zero Blockers and Critical findings but
 still lists Suggestions, one last fix round triages them in the same session:
 it implements the ones worth keeping, skips the ones that describe intended
-behavior or stem from the reviewers' isolated worktree, and no further review
-follows. A round that changes nothing ends the run exactly like a clean review
-did before. `FIX_SUGGESTIONS=0` or `--no-fix-suggestions` turns the round off.
-If it pushes commits, the run still waits for CI on them, and auto-merge is
-skipped because the review never saw those commits.
+behavior or stem from the reviewers' isolated worktree, and no further fix
+round follows. A round that changes nothing ends the run exactly like a clean
+review did before. `FIX_SUGGESTIONS=0` or `--no-fix-suggestions` turns the
+round off. If it pushes commits, the run still waits for CI on them.
+
+Auto-merge approves a reviewed head only, so a run that is going to merge
+(`AUTO_MERGE=1` or `--auto-merge`, on a pull request that is not a draft, with
+posting on) has one more review cover those commits. It runs beside their CI
+wait, does not count against `--max-iter`, and only gates:
+
+- No Blocker and no Critical: that review is the run's final one, and the
+  merge approves its head. Suggestions it lists are reported and left alone.
+- A Blocker or Critical: the run stops unmerged with exit 4. No fix round
+  follows, because a suggestion round that reopened the loop would never end.
+- A CI fix after the suggestion round cancels the review and starts it again
+  for the repaired head, like any other CI fix.
+- The base is checked once more before the run ends, also when the suggestion
+  round changed nothing. A base update goes through CI and the same gate. A
+  base that moves a fourth time stops the run with exit 4, on a head it does
+  not call reviewed.
+
+Without auto-merge no such review runs, the commits stay unreviewed, and the
+run reports ready. An offline run does the same review before its single push.
+Once its suggestion round has run, a push repair, a CI repair or a base update
+that moves the head is reviewed by the same gate instead of a new fix round.
 
 After a posted PR run converges with green CI, a fresh read-only pass on the
 review model writes a local PR-description candidate. It receives the precomputed diff and

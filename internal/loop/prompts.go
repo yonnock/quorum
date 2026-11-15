@@ -101,17 +101,24 @@ func firstPrompt(rules, prContext, step string) string {
 
 // The closing sentence matters for cost: a session that watches CI itself
 // bills idle time while the pipeline is already watching the same checks.
+//
+// The second paragraph matters for the fix budget. The watch stops at the
+// first red check, so failsJSON can miss a check that fails a minute later; a
+// session that repairs only the list leaves that one to another CI round and
+// another of the run's few fix attempts.
 func ciFixPrompt(number int, failsJSON string) string {
 	return fmt.Sprintf(`CI on PR #%d is red. Failing checks as JSON:
 
 %s
+
+This list was taken at the first failure, while other checks of the same commit were still running. Before you commit, run gh pr checks %d once more and fix what else has failed by then as well; do not wait for checks that are still running.
 
 Inspect the failures with gh (for example: gh run view <run-id> --log-failed; the run id is the number after /runs/ in the link). Reproduce locally where practical, fix the problems, run the affected checks locally, commit, and push. Do not wait for CI; the pipeline watches the checks for you and starts another fix session if they are still red.
 
 End your final message with a line that is exactly:
 %s
 followed by a short log comment for the PR: what failed, what you changed and how, and which checks you ran. Write it in the language of the PR description, plain and factual, and never mention AI, agents, automation, or the name of any coding tool in it. Use this marker for nothing else.`,
-		number, failsJSON, markerComment)
+		number, failsJSON, number, markerComment)
 }
 
 // testFixPrompt asks the session to repair the repository's local test

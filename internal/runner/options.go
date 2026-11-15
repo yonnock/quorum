@@ -67,12 +67,14 @@ func LoopOptions(cfg config.Config, p paths.P, t Tools, repo, repoRoot string, n
 		ResolveConflicts:     cfg.ResolveConflicts,
 		BaseUpdateOnConflict: cfg.BaseUpdate == config.BaseUpdateConflicts,
 		FixSuggestions:       cfg.FixSuggestions,
-		Offline:              cfg.LoopMode != config.LoopOnline,
-		Bypass:               !cfg.Sandboxed,
-		UseDirenv:            t.Direnv != "",
-		RunsDir:              p.BabysitRuns,
-		DepsDir:              p.DepsCache,
-		Bins:                 t.Engines,
-		DirenvBin:            t.Direnv,
+		// The agent merges what it reviewed whenever auto-merge is on.
+		VerifySuggestionRound: cfg.AutoMerge,
+		Offline:               cfg.LoopMode != config.LoopOnline,
+		Bypass:                !cfg.Sandboxed,
+		UseDirenv:             t.Direnv != "",
+		RunsDir:               p.BabysitRuns,
+		DepsDir:               p.DepsCache,
+		Bins:                  t.Engines,
+		DirenvBin:             t.Direnv,
 	}
 }

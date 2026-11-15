@@ -176,9 +176,11 @@ All fix rounds share one Codex session, so context carries across rounds.
 
 When the final review is clean but still lists Suggestions, one last fix round
 triages them: it implements the ones worth keeping and skips the rest, and no
-further review follows. `FIX_SUGGESTIONS=0` or `--no-fix-suggestions` turns
-that off. If that round pushes commits, auto-merge is skipped because the
-review never saw them.
+further fix round follows. `FIX_SUGGESTIONS=0` or `--no-fix-suggestions` turns
+that off. When the run is going to merge and that round pushed commits, one
+more review covers them while their CI runs, and the merge follows if it finds
+no Blocker and no Critical. Without auto-merge the commits stay unreviewed and
+the run reports ready.
 
 An opt-in divergence scan can explain why a run still has findings at its round
 limit:
@@ -230,11 +232,12 @@ The wait for protected checks and mergeability defaults to two hours;
 set `AUTO_MERGE_TIMEOUT=0` to wait until the run is stopped. Change these
 settings with `quorum config` or in the config file.
 
-To merge one babysit run without changing the config, pass the flag. The
-suggestion round would push commits the review never saw, so turn it off when
-the merge matters more:
+To merge one babysit run without changing the config, pass the flag. Commits
+the suggestion round pushes get a review of their own before the merge; turn
+the round off to save that review:
 
 ```bash
+quorum babysit 42 --auto-merge
 quorum babysit 42 --auto-merge --no-fix-suggestions
 ```
 

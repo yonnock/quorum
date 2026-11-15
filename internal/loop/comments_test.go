@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -102,6 +103,74 @@ func TestPRCommentExemptsGeneratedReviewURLOnly(t *testing.T) {
 		"PR COMMENT:\nCodex fixed the check.", "", "abc123 Fix check")
 	if _, posted := r.postPRComment("fix-log comment", body, reviewURL); posted {
 		t.Fatal("prohibited session text was exempted with the generated review URL")
+	}
+}
+
+// A fix log names the files it touched, and a repository is free to track
+// files such as AGENTS.md. Naming one is not a mention of a coding tool; the
+// same words outside a tracked path still are.
+func TestPRCommentMayNameTrackedPaths(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	worktree := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"config", "user.name", "Test User"},
+		{"config", "user.email", "test@example.invalid"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", worktree}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	for _, name := range []string{"scripts/check-agent-context.budget.json", "docs/agents/contracts.md", "AGENTS.md"} {
+		path := filepath.Join(worktree, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("git", "-C", worktree, "add", ".").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "gh")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' 'https://example.invalid/comment'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rep := &warningReporter{}
+	r := &run{
+		p:        &Pipeline{GH: gh.New(bin), Git: git.New("git")},
+		o:        Options{RepoRoot: dir, Post: true},
+		ctx:      context.Background(),
+		rep:      rep,
+		pr:       gh.FullPR{Number: 42},
+		worktree: worktree,
+	}
+
+	for _, text := range []string{
+		"Budget in `scripts/check-agent-context.budget.json` angepasst.",
+		"Budget in check-agent-context.budget.json, Regeln in `docs/agents/` und (`AGENTS.md`) angepasst.",
+		"See docs/agents/contracts.md:12 for the contract.",
+	} {
+		body := fixCommentBody("CI fix 1", "", "", "PR COMMENT:\n"+text, "", "abc123 Fix check")
+		if _, posted := r.postPRComment("fix-log comment", body, ""); !posted {
+			t.Errorf("comment naming tracked paths was rejected: %q: %v", text, rep.warnings)
+		}
+	}
+	for _, text := range []string{
+		"Codex adjusted `scripts/check-agent-context.budget.json`.",
+		"Several agents edited AGENTS.md.",
+		"Budget in `scripts/agent-budget.json` angepasst.",
+		"Handed docs/agents to the agents.",
+		"See AGENTS.md:Codex for the rule.",
+	} {
+		body := fixCommentBody("CI fix 1", "", "", "PR COMMENT:\n"+text, "", "abc123 Fix check")
+		if _, posted := r.postPRComment("fix-log comment", body, ""); posted {
+			t.Errorf("comment with a prohibited term outside a tracked path was posted: %q", text)
+		}
 	}
 }
 

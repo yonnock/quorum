@@ -11,7 +11,8 @@ import (
 // round, one push, one CI run. It reports whether the run settled - the
 // pushed branch still carries the head the clean review described. When CI
 // repairs moved the head, the caller sends the run through another review
-// round instead of converging on commits no review has seen.
+// round, unless a suggestion round already ran: then further reviews only
+// gate, and a blocking finding stops the run without another fix round.
 func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, comment string) (bool, error) {
 	terminalSuggestion := false
 	if suggestionRoundDue(r.o, findings) && !r.suggestionDone {
@@ -27,67 +28,125 @@ func (r *run) finalizeOffline(res *Result, round int, findings review.Findings, 
 		if err != nil {
 			return false, err
 		}
+		if pushed && r.verifiesSuggestionRound() {
+			// Reviewed here, before the push: the review that follows is
+			// then the one whose comment the run posts and whose head it
+			// publishes.
+			if comment, err = r.reviewSuggestionCommits(res, round+1); err != nil {
+				return false, err
+			}
+			findings, round = res.LastFindings, round+1
+		}
 	}
 	if !terminalSuggestion {
 		if err := r.ensureTestsGreen(); err != nil {
 			return false, err
 		}
 	}
-	current, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
-	if err != nil {
-		return false, err
-	}
-	if current != findings.HeadSHA {
-		if terminalSuggestion {
-			r.rep.Info("terminal suggestion changes passed the local test gate")
-		} else {
-			r.rep.Info("local test fixes moved the head past the clean review; reviewing the repaired head")
-			return false, nil
-		}
-	}
-	baseUpdated, err := r.ensureBaseCurrent()
-	if err != nil {
-		return false, err
-	}
-	if baseUpdated {
-		r.rep.Info("base branch update moved the head past the clean review; reviewing the updated head")
-		return false, nil
-	}
-
-	r.rep.Step("Push")
-	if err := r.pushBranchWithFixes(); err != nil {
-		return false, err
-	}
-	if err := r.flushFixComments(); err != nil {
-		return false, err
-	}
-
-	if !r.target.BranchOnly {
-		prePushSHA := r.headSHA
-		r.rep.Step("CI")
-		if err := r.ensureCIGreen(); err != nil {
+	for updates := 1; ; updates++ {
+		current, err := r.p.Git.RevParse(r.ctx, r.worktree, "HEAD")
+		if err != nil {
 			return false, err
 		}
-		if r.headSHA != prePushSHA {
-			r.rep.Info("CI repairs moved the head past the reviewed commit; reviewing the repaired head")
-			return false, nil
+		if current != findings.HeadSHA {
+			if terminalSuggestion {
+				r.rep.Info("terminal suggestion changes passed the local test gate")
+			} else {
+				r.rep.Info("local test fixes moved the head past the clean review; reviewing the repaired head")
+				return false, nil
+			}
 		}
 		baseUpdated, err := r.ensureBaseCurrent()
 		if err != nil {
 			return false, err
 		}
 		if baseUpdated {
-			r.rep.Info("base branch advanced during CI; reviewing the updated head")
-			return false, nil
+			r.rep.Info("base branch update moved the head past the clean review; reviewing the updated head")
+			if !terminalSuggestion {
+				return false, nil
+			}
+			if updates > terminalBaseUpdates {
+				return false, r.errBaseKeptMoving(res)
+			}
+			if comment, err = r.reviewSuggestionCommits(res, round+1); err != nil {
+				return false, err
+			}
+			findings, round = res.LastFindings, round+1
+			// The base may have moved again during that review, and a
+			// branch without a pull request gets no later check of it.
+			continue
 		}
-		if err := r.requirePublishedHead(r.headSHA); err != nil {
-			return false, fmt.Errorf("checking the pull request head after CI: %w", err)
+
+		r.rep.Step("Push")
+		if err := r.pushBranchWithFixes(); err != nil {
+			return false, err
 		}
+		if err := r.flushFixComments(); err != nil {
+			return false, err
+		}
+		// A push the repository's own verification refused is repaired by a fix
+		// session, and its commit is one the review has not seen either. Ending
+		// here would leave the review without a head to post to, and a run that
+		// was going to merge would end unmerged without a word.
+		if current == findings.HeadSHA && r.headSHA != current {
+			r.rep.Info("push repairs moved the head past the reviewed commit; reviewing the repaired head")
+			if !terminalSuggestion {
+				return false, nil
+			}
+			// After the suggestion round the review of the repaired head gates
+			// like the one before it: handing it to the loop would let a
+			// finding start the fix round a suggestion round must not have.
+			if comment, err = r.reviewSuggestionCommits(res, round+1); err != nil {
+				return false, err
+			}
+			findings, round = res.LastFindings, round+1
+		}
+
+		if !r.target.BranchOnly {
+			prePushSHA := r.headSHA
+			r.rep.Step("CI")
+			if err := r.ensureCIGreen(); err != nil {
+				return false, err
+			}
+			if r.headSHA != prePushSHA {
+				r.rep.Info("CI repairs moved the head past the reviewed commit; reviewing the repaired head")
+				if !terminalSuggestion {
+					return false, nil
+				}
+				if comment, err = r.reviewSuggestionCommits(res, round+1); err != nil {
+					return false, err
+				}
+				findings, round = res.LastFindings, round+1
+			}
+			baseUpdated, err := r.ensureBaseCurrent()
+			if err != nil {
+				return false, err
+			}
+			if baseUpdated {
+				r.rep.Info("base branch advanced during CI; reviewing the updated head")
+				if !terminalSuggestion {
+					return false, nil
+				}
+				if updates > terminalBaseUpdates {
+					return false, r.errBaseKeptMoving(res)
+				}
+				if comment, err = r.reviewSuggestionCommits(res, round+1); err != nil {
+					return false, err
+				}
+				findings, round = res.LastFindings, round+1
+				// The offline base update is still local. Publish it and wait
+				// for its checks without returning to the ordinary fix loop.
+				continue
+			}
+			if err := r.requirePublishedHead(r.headSHA); err != nil {
+				return false, fmt.Errorf("checking the pull request head after CI: %w", err)
+			}
+		}
+		if err := r.postFinalReviewComment(res, round, findings, comment); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
-	if err := r.postFinalReviewComment(res, round, findings, comment); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // queueFixComment captures one offline round's fix log for the consolidated
