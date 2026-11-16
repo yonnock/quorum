@@ -36,7 +36,7 @@ costs one review no matter how many times it is pushed to.
 ## Install
 
 ```bash
-brew install yungweng/tap/quorum terminal-notifier
+brew install yonnock/tap/quorum terminal-notifier
 brew install --cask codex     # Homebrew formulas cannot depend on a cask
 ```
 
