@@ -221,7 +221,7 @@ mind, in order:
 
 ## Releases
 
-Distribution is the Homebrew tap `yungweng/homebrew-tap`. The formula there is
+Distribution is the Homebrew tap `yonnock/homebrew-tap`. The formula there is
 updated automatically; never edit it by hand for a version bump.
 
 Releasing is one edit: set `Version` in `main.go` and merge it to `main`. Do not
