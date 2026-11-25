@@ -39,11 +39,13 @@ deadcode:
 # linter built for one Go release cannot type-check another release's stdlib,
 # so a newer local Go would otherwise break the check. Keep the version in sync
 # with .github/workflows/ci.yml.
+# CGO_ENABLED=0: the linter needs no cgo, and an older toolchain's external
+# linker cannot read a newer macOS SDK.
 GOLANGCI_LINT_VERSION := v2.12.2
 GO_VERSION := $(shell sed -n 's/^go //p' go.mod)
 
 lint:
-	GOTOOLCHAIN=go$(GO_VERSION) go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	GOTOOLCHAIN=go$(GO_VERSION) CGO_ENABLED=0 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 check: fmt-check test build deadcode lint
 
