@@ -98,6 +98,10 @@ type timings struct {
 	// prePushRetry is the pause before pre-push verification is retried after
 	// losing the golangci-lint lock.
 	prePushRetry time.Duration
+	// headPoll and headSettle space and bound the wait for GitHub to report a
+	// pushed sha as the PR head.
+	headPoll   time.Duration
+	headSettle time.Duration
 }
 
 func orDefault(d, def time.Duration) time.Duration {
@@ -116,6 +120,8 @@ func (t timings) noChecksWindow() time.Duration {
 func (t timings) prePushRetryDelay() time.Duration {
 	return orDefault(t.prePushRetry, prePushLockRetryDelay)
 }
+func (t timings) headPollInterval() time.Duration { return orDefault(t.headPoll, 5*time.Second) }
+func (t timings) headSettleWindow() time.Duration { return orDefault(t.headSettle, headSettleTimeout) }
 
 type Options struct {
 	Repo     string
@@ -414,12 +420,22 @@ func (r *run) prepare() error {
 		return err
 	}
 	if headSHA != pr.HeadRefOid {
-		source := "GitHub PR metadata"
 		if tgt.BranchOnly {
-			source = "the branch head resolved at startup"
+			r.rep.Warn(fmt.Sprintf("origin/%s (%s) differs from the branch head resolved at startup (%s); using origin/%s",
+				r.branch, headSHA, pr.HeadRefOid, r.branch))
+		} else {
+			// GitHub's reviews, CI and merges all follow the PR head, not the
+			// branch ref. Working on a head the PR does not report yet gets a
+			// review of the wrong sha and no CI at all, so wait for the PR to
+			// catch up and stop if it never does.
+			r.rep.Info(fmt.Sprintf("waiting for GitHub to report origin/%s (%s) as the head of PR #%d",
+				r.branch, shortSHA(headSHA), pr.Number))
+			if err := r.awaitPRHead(headSHA); err != nil {
+				return err
+			}
+			pr.HeadRefOid = headSHA
+			r.pr = pr
 		}
-		r.rep.Warn(fmt.Sprintf("origin/%s (%s) differs from %s (%s); using origin/%s",
-			r.branch, headSHA, source, pr.HeadRefOid, r.branch))
 	}
 	r.headSHA = headSHA
 	if r.p.Git.HasLocalBranch(r.ctx, r.o.RepoRoot, r.branch) {
@@ -1223,7 +1239,7 @@ func (r *run) pushBranch() error {
 	logPath := filepath.Join(r.logDir, pushLogFile)
 	os.WriteFile(logPath, []byte(out), 0o644)
 
-	deadline := time.Now().Add(headSettleTimeout)
+	deadline := time.Now().Add(r.timing.headSettleWindow())
 	remote, _ := r.remoteHead()
 	if pushErr != nil {
 		return &pushRejection{branch: r.branch, sha: pushedSHA, out: out}
@@ -1239,7 +1255,7 @@ func (r *run) pushBranch() error {
 func (r *run) waitForPushedHead(pushedSHA string, deadline time.Time) error {
 	return r.waitActivity("waiting for GitHub to register the pushed head", func() error {
 		for {
-			if err := r.sleep(5 * time.Second); err != nil {
+			if err := r.sleep(r.timing.headPollInterval()); err != nil {
 				return err
 			}
 			remote, _ := r.remoteHead()
@@ -1248,11 +1264,48 @@ func (r *run) waitForPushedHead(pushedSHA string, deadline time.Time) error {
 				return nil
 			}
 			if time.Now().After(deadline) {
-				return fmt.Errorf("origin/%s still reports %s instead of the pushed %s after %s; is someone else pushing to it?",
-					r.branch, remote, pushedSHA, headSettleTimeout)
+				return r.staleHeadError(remote, pushedSHA)
 			}
 		}
 	})
+}
+
+// awaitPRHead waits until GitHub reports want as the PR head.
+func (r *run) awaitPRHead(want string) error {
+	deadline := time.Now().Add(r.timing.headSettleWindow())
+	return r.waitActivity("waiting for GitHub to report the PR head", func() error {
+		for {
+			got, err := r.p.GH.HeadSHA(r.ctx, r.o.RepoRoot, r.pr.Number)
+			if err == nil && got == want {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				return r.staleHeadError(got, want)
+			}
+			if err := r.sleep(r.timing.headPollInterval()); err != nil {
+				return err
+			}
+		}
+	})
+}
+
+// staleHeadError explains a head GitHub never reported. When the branch ref
+// on origin already has the sha, the push landed and only GitHub's PR lags:
+// it dropped the push event, so the PR, its CI and its reviews stay on the old
+// head until another push arrives.
+func (r *run) staleHeadError(reported, want string) error {
+	settle := r.timing.headSettleWindow()
+	if !r.target.BranchOnly {
+		onOrigin, err := r.p.Git.LsRemote(r.ctx, r.o.RepoRoot, "origin", "refs/heads/"+r.branch)
+		if err == nil && onOrigin == want {
+			return fmt.Errorf("origin/%s is at %s, but GitHub still reports %s as the head of PR #%d after %s: "+
+				"GitHub did not process the push, so no CI starts for it. "+
+				"Push a new commit to resync the PR (git commit --allow-empty -m 'Resync PR' && git push), then run again",
+				r.branch, want, reported, r.pr.Number, settle)
+		}
+	}
+	return fmt.Errorf("origin/%s still reports %s instead of the pushed %s after %s; is someone else pushing to it?",
+		r.branch, reported, want, settle)
 }
 
 type prePushContention struct {
