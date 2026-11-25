@@ -177,6 +177,10 @@ func (c *Client) HasActiveWorkflows(ctx context.Context, repo string) (bool, err
 	return active, nil
 }
 
+// rulesetsNeedPaidPlan is the 403 GitHub gives for the rulesets of a private
+// repository on a plan without them.
+const rulesetsNeedPaidPlan = "Upgrade to GitHub Pro or make this repository public"
+
 // RequiredChecks lists the status check contexts the base branch requires,
 // from classic branch protection and from rulesets together. These are the
 // checks GitHub waits for before it allows a merge, including ones that have
@@ -221,6 +225,14 @@ func (c *Client) RequiredChecks(ctx context.Context, repo, branch string) ([]str
 
 	out, err = c.run(ctx, "", "api", "--paginate", fmt.Sprintf("repos/%s/rules/branches/%s?per_page=100", repo, escaped))
 	if err != nil {
+		// A private repository on GitHub Free cannot have rulesets, and the
+		// endpoint answers 403 instead of an empty list. Branch protection
+		// above is then the whole answer. Any other error may hide a required
+		// check and stays an error.
+		if strings.Contains(err.Error(), rulesetsNeedPaidPlan) {
+			slices.Sort(required)
+			return required, nil
+		}
 		return nil, err
 	}
 	type rule struct {

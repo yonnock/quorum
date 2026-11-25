@@ -39,6 +39,35 @@ esac`)
 	}
 }
 
+func TestRequiredChecksReadsBranchProtectionWhenThePlanHasNoRulesets(t *testing.T) {
+	bin, _ := fakeGH(t, `
+case "$*" in
+  *rules/branches*)
+    echo '{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"403"}'
+    echo 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)' >&2
+    exit 1 ;;
+  *) echo '{"protection":{"required_status_checks":{"enforcement_level":"everyone","contexts":["ci-gate"]}}}' ;;
+esac`)
+	got, err := testClient(bin).RequiredChecks(context.Background(), "acme/api", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ci-gate"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("required = %v, want %v", got, want)
+	}
+}
+
+func TestRequiredChecksFailsOnOtherRulesetErrors(t *testing.T) {
+	bin, _ := fakeGH(t, `
+case "$*" in
+  *rules/branches*) echo 'gh: Must have admin rights to Repository. (HTTP 403)' >&2; exit 1 ;;
+  *) echo '{}' ;;
+esac`)
+	if _, err := testClient(bin).RequiredChecks(context.Background(), "acme/api", "main"); err == nil {
+		t.Fatal("want an error, a ruleset that cannot be read may require checks")
+	}
+}
+
 func TestWorkflowRunsKeepsTheNewestRunPerWorkflowAndEvent(t *testing.T) {
 	bin, _ := fakeGH(t, `
 if [[ "$*" != "api --paginate repos/acme/api/actions/runs?head_sha=abc123&per_page=100" ]]; then
